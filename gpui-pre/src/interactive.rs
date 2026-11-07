@@ -753,6 +753,28 @@ impl Render for ExternalPaths {
     }
 }
 
+/// Text from the platform, such as a selection dragged in from another application.
+///
+/// It is the value of an external text drag, received with `on_drop::<ExternalText>` as
+/// file drops are received with `on_drop::<ExternalPaths>`: the drag model dispatches by the
+/// dragged value's type, so text has a type of its own beside the paths.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ExternalText(pub String);
+
+impl ExternalText {
+    /// The dragged text.
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Render for ExternalText {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // the platform renders the dragged text's image
+        Empty
+    }
+}
+
 /// A file drop event from the platform, generated when files are dragged and dropped onto the window.
 #[derive(Debug, Clone)]
 pub enum FileDropEvent {
@@ -762,6 +784,14 @@ pub enum FileDropEvent {
         position: Point<Pixels>,
         /// The paths of the files that are being dragged.
         paths: ExternalPaths,
+    },
+    /// Text dragged from another application has entered the window. The rest of the drag is
+    /// the same `Pending`, `Submit`, `Exited` and `Ended` events as a file drag's.
+    TextEntered {
+        /// The position of the mouse relative to the window.
+        position: Point<Pixels>,
+        /// The text being dragged.
+        text: ExternalText,
     },
     /// The files are being dragged over the window
     Pending {

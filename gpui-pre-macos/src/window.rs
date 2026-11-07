@@ -10,12 +10,13 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    ExternalPaths, ExternalText, FileDropEvent, ForegroundExecutor, FrameRequestSource,
+    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -38,6 +39,7 @@ use objc2::{
     reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
 )]
 use objc2_app_kit::NSFilenamesPboardType;
+use objc2_app_kit::NSPasteboardTypeString;
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSAppearance, NSAutoresizingMaskOptions, NSBackingStoreType, NSBeep,
     NSButton, NSColor, NSDragOperation, NSDraggingContext, NSDraggingImageComponent,
@@ -1041,14 +1043,9 @@ impl MacWindow {
                 screen: target_screen.as_deref()
             ];
             assert!(!native_window.is_null());
-            #[expect(
-                deprecated,
-                reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
-            )]
             let () = msg_send![
                 native_window,
-                registerForDraggedTypes:
-                    &*NSArray::from_slice(&[NSFilenamesPboardType])
+                registerForDraggedTypes: &*dragged_types()
             ];
             let () = msg_send![
                 native_window,
@@ -3611,8 +3608,8 @@ extern "C" fn dragging_entered(
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
-    let paths = external_paths_from_event(dragging_info);
-    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
+    let dropped = external_drop_from_event(dragging_info);
+    if let Some(event) = dropped.map(|dropped| dropped.entered(position))
         && send_file_drop_event(window_state, event)
     {
         if is_source_window {
@@ -3657,12 +3654,58 @@ extern "C" fn perform_drag_operation(
     send_file_drop_event(window_state, FileDropEvent::Submit { position }).to_objc()
 }
 
-fn external_paths_from_event(dragging_info: *mut AnyObject) -> Option<ExternalPaths> {
-    let mut paths = SmallVec::new();
+/// The pasteboard types a window accepts dragged in from outside it: file names (a file drop) and
+/// plain text (text dragged from another application).
+fn dragged_types() -> Retained<NSArray<NSString>> {
+    #[expect(
+        deprecated,
+        reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
+    )]
+    let filenames = unsafe { NSFilenamesPboardType };
+    NSArray::from_slice(&[filenames, unsafe { NSPasteboardTypeString }])
+}
+
+/// What a drag from outside the window carries.
+#[derive(Debug)]
+enum ExternalDrop {
+    /// File names: a file drop, whatever else the pasteboard holds.
+    Paths(ExternalPaths),
+    /// Plain text, when the pasteboard holds no file names.
+    Text(ExternalText),
+}
+
+impl ExternalDrop {
+    /// The event that starts the drag in the window.
+    fn entered(self, position: Point<Pixels>) -> FileDropEvent {
+        match self {
+            ExternalDrop::Paths(paths) => FileDropEvent::Entered { position, paths },
+            ExternalDrop::Text(text) => FileDropEvent::TextEntered { position, text },
+        }
+    }
+}
+
+fn external_drop_from_event(dragging_info: *mut AnyObject) -> Option<ExternalDrop> {
     let pasteboard: *mut AnyObject = unsafe { msg_send![dragging_info, draggingPasteboard] };
+    external_drop_from_pasteboard(pasteboard)
+}
+
+/// File names first, so a file drop is unchanged when the pasteboard also holds text (Finder and
+/// GPUI's own file copy write both); otherwise the pasteboard's non-empty plain text.
+fn external_drop_from_pasteboard(pasteboard: *mut AnyObject) -> Option<ExternalDrop> {
     if pasteboard.is_null() {
         return None;
     }
+    if let Some(paths) = external_paths_from_pasteboard(pasteboard) {
+        return Some(ExternalDrop::Paths(paths));
+    }
+    let text: *mut NSString =
+        unsafe { msg_send![pasteboard, stringForType: NSPasteboardTypeString] };
+    let text = unsafe { text.as_ref() }?.to_string();
+    (!text.is_empty()).then(|| ExternalDrop::Text(ExternalText(text)))
+}
+
+fn external_paths_from_pasteboard(pasteboard: *mut AnyObject) -> Option<ExternalPaths> {
+    let mut paths = SmallVec::new();
     #[expect(
         deprecated,
         reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
@@ -3772,7 +3815,7 @@ fn send_file_drop_event(
     file_drop_event: FileDropEvent,
 ) -> bool {
     let external_files_dragged = match file_drop_event {
-        FileDropEvent::Entered { .. } => Some(true),
+        FileDropEvent::Entered { .. } | FileDropEvent::TextEntered { .. } => Some(true),
         FileDropEvent::Exited | FileDropEvent::Ended => Some(false),
         _ => None,
     };
@@ -4041,6 +4084,108 @@ mod tests {
                 ];
                 assert_eq!(display_id_for_screen(screen), Some(display_id));
             }
+        });
+    }
+
+    use objc2_app_kit::NSPasteboard;
+
+    /// A pasteboard of its own, as a drag from another application fills one.
+    fn unique_pasteboard() -> Retained<NSPasteboard> {
+        let name = NSString::from_str(&format!("gpui-drop-test-{}", uuid::Uuid::new_v4()));
+        NSPasteboard::pasteboardWithName(&name)
+    }
+
+    /// Named pasteboards outlive the process until released.
+    fn release(pasteboard: &NSPasteboard) {
+        let () = unsafe { msg_send![pasteboard, releaseGlobally] };
+    }
+
+    fn drop_from(pasteboard: &NSPasteboard) -> Option<ExternalDrop> {
+        external_drop_from_pasteboard(ptr::from_ref(pasteboard).cast_mut().cast())
+    }
+
+    #[test]
+    fn dragged_types_are_file_names_and_text() {
+        autoreleasepool(|_| {
+            let types = dragged_types();
+            let names: Vec<String> = types.iter().map(|name| name.to_string()).collect();
+            #[expect(
+                deprecated,
+                reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
+            )]
+            let filenames = unsafe { NSFilenamesPboardType }.to_string();
+            let text = unsafe { NSPasteboardTypeString }.to_string();
+            assert_eq!(names, [filenames, text]);
+        });
+    }
+
+    #[test]
+    fn a_text_only_pasteboard_is_a_text_drop() {
+        autoreleasepool(|_| {
+            let pasteboard = unique_pasteboard();
+            pasteboard.clearContents();
+            let dragged = "Notes from the review: https://example.com/plan";
+            assert!(
+                pasteboard.setString_forType(&NSString::from_str(dragged), unsafe {
+                    NSPasteboardTypeString
+                })
+            );
+            match drop_from(&pasteboard) {
+                Some(ExternalDrop::Text(text)) => assert_eq!(text.text(), dragged),
+                other => panic!("expected a text drop, got {other:?}"),
+            }
+            let position = point(px(3.), px(4.));
+            assert!(matches!(
+                ExternalDrop::Text(ExternalText(dragged.to_owned())).entered(position),
+                FileDropEvent::TextEntered { position: at, text } if at == position && text.text() == dragged
+            ));
+            release(&pasteboard);
+        });
+    }
+
+    #[test]
+    fn file_names_beside_text_are_a_file_drop() {
+        autoreleasepool(|_| {
+            let pasteboard = unique_pasteboard();
+            #[expect(
+                deprecated,
+                reason = "File-drop decoding expects a property-list array of paths; replacing NSFilenamesPboardType requires migrating both registration and decoding to file URLs"
+            )]
+            let filenames = unsafe { NSFilenamesPboardType };
+            let text = unsafe { NSPasteboardTypeString };
+            unsafe {
+                pasteboard.declareTypes_owner(&NSArray::from_slice(&[filenames, text]), None)
+            };
+            let paths = NSArray::from_retained_slice(&[
+                NSString::from_str("/tmp/a.txt"),
+                NSString::from_str("/tmp/b c.txt"),
+            ]);
+            assert!(unsafe { pasteboard.setPropertyList_forType(&paths, filenames) });
+            assert!(pasteboard.setString_forType(&NSString::from_str("a.txt\nb c.txt"), text));
+            match drop_from(&pasteboard) {
+                Some(ExternalDrop::Paths(paths)) => assert_eq!(
+                    paths.paths(),
+                    [PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")]
+                ),
+                other => panic!("expected a file drop, got {other:?}"),
+            }
+            release(&pasteboard);
+        });
+    }
+
+    #[test]
+    fn an_empty_pasteboard_or_empty_text_is_no_drop() {
+        autoreleasepool(|_| {
+            assert!(external_drop_from_pasteboard(ptr::null_mut()).is_none());
+            let pasteboard = unique_pasteboard();
+            pasteboard.clearContents();
+            assert!(drop_from(&pasteboard).is_none());
+            assert!(
+                pasteboard
+                    .setString_forType(&NSString::from_str(""), unsafe { NSPasteboardTypeString })
+            );
+            assert!(drop_from(&pasteboard).is_none());
+            release(&pasteboard);
         });
     }
 
