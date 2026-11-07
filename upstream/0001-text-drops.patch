@@ -13,6 +13,12 @@ value is a new ExternalText, received with on_drop::<ExternalText> just as
 files are received with on_drop::<ExternalPaths>; the rest of the drag is
 the existing Pending, Submit, Exited and Ended events.
 
+A platform drag's Entered, TextEntered, Pending and Submit events now count
+as pointer input in the window's input modality: AppKit sends a window no
+mouse-moved events during a drag, so after any keystroke the modality stayed
+Keyboard, Hitbox::is_hovered answered false and a drop (of files today)
+reached no on_drop handler.
+
 The text is a type of its own, not an enum wrapping the paths, because the
 drag model dispatches on_drop by the dragged value's type: wrapping the
 paths would stop every existing on_drop::<ExternalPaths> handler.
@@ -29,8 +35,8 @@ missing pasteboard, an empty one and empty text read as no drop.
 ---
  gpui-pre-macos/src/window.rs | 179 +++++++++++++++++++++++++++++++++++++++----
  gpui-pre/src/interactive.rs  |  30 ++++++++
- gpui-pre/src/window.rs       |  19 +++++
- 3 files changed, 211 insertions(+), 17 deletions(-)
+ gpui-pre/src/window.rs       |  28 +++++++
+ 3 files changed, 220 insertions(+), 17 deletions(-)
 
 diff --git a/gpui-pre-macos/src/window.rs b/gpui-pre-macos/src/window.rs
 index f2208d3..528cfbd 100644
@@ -319,10 +325,26 @@ index cfb1410..7144d85 100644
      Pending {
          /// The position of the mouse relative to the window.
 diff --git a/gpui-pre/src/window.rs b/gpui-pre/src/window.rs
-index c559412..d0dcd4c 100644
+index c559412..22ee314 100644
 --- a/gpui-pre/src/window.rs
 +++ b/gpui-pre/src/window.rs
-@@ -5714,6 +5714,25 @@ impl Window {
+@@ -5641,6 +5641,15 @@ impl Window {
+         self.last_input_modality = match &event {
+             PlatformInput::KeyDown(_) => InputModality::Keyboard,
+             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
++            // A drag from another application moves the pointer without mouse-moved events, so its
++            // events are pointer input too: otherwise a drop right after typing finds no element
++            // hovered and no `on_drop` handler runs.
++            PlatformInput::FileDrop(
++                FileDropEvent::Entered { .. }
++                | FileDropEvent::TextEntered { .. }
++                | FileDropEvent::Pending { .. }
++                | FileDropEvent::Submit { .. },
++            ) => InputModality::Mouse,
+             PlatformInput::Touch(_) => InputModality::Touch,
+             _ => self.last_input_modality,
+         };
+@@ -5714,6 +5723,25 @@ impl Window {
                          modifiers: Modifiers::default(),
                      })
                  }

@@ -21,6 +21,11 @@ This change:
   `ExternalText(String)`; elements receive it with `on_drop::<ExternalText>` exactly as files are received with
   `on_drop::<ExternalPaths>`, and the rest of the drag is the existing `Pending`, `Submit`, `Exited` and `Ended`
   events.
+- counts a platform drag's `Entered`, `TextEntered`, `Pending` and `Submit` events as pointer input in
+  `Window::dispatch_event`'s input modality. AppKit sends a window no mouse-moved events during a drag session, so
+  after any keystroke the modality stayed `Keyboard`, `Hitbox::is_hovered` answered false, and the drop reached no
+  `on_drop` handler: a file or text dropped right after typing in the window was lost. This affects file drops
+  today, independently of the text change.
 
 Why a type of its own rather than an enum around the paths: the drag model dispatches `on_drop` by the dragged value's
 type, so wrapping `ExternalPaths` in an enum would stop every existing `on_drop::<ExternalPaths>` handler.
@@ -30,13 +35,15 @@ drops; their text drops follow their own registration and are left for later.
 Release Notes:
 
 - Text dragged from other applications can now be dropped into GPUI windows on macOS.
+- Fixed a file dropped right after typing in a window reaching no drop handler.
 
 ### Tests
 
 `gpui_macos` window tests: the registered types are file names and text; a text-only pasteboard reads as a text drop;
 file names beside text read as the files; a missing pasteboard, an empty one and empty text read as no drop. A
-downstream application (Dacto's desktop client) tests the delivery through `Window::dispatch_event` with
-`on_drop::<ExternalText>` and `on_drop::<ExternalPaths>` side by side.
+downstream application (Dacto's desktop client) tests the delivery through a real window's `Window::dispatch_event`
+with `on_drop::<ExternalText>` beside a file drop, including a drop right after a keystroke, which fails without the
+modality change.
 
 ### Notes for the reviewer
 

@@ -10,8 +10,10 @@ nothing else of Zed's tree is fetched:
 | `gpui-pre/`       | `gpui-pre`        | 0.3.10  | `df4b5f8d0c278308df2f11e0bfe0212dd77d7848ce1bdc4b9d513334414396f6` |
 | `gpui-pre-macos/` | `gpui-pre-macos`  | 0.3.10  | `7e07a5e5c84f0b2160c194a1c852cc89d1942db66867938ceabcd7f763cb4386` |
 
-The first commit is those sources unchanged (the checksums above are the ones crates.io and Cargo.lock record), so the
-second commit's diff is the patch alone.
+The first commit is those sources unchanged (the checksums above are the ones crates.io and Cargo.lock record), so
+every later commit's diff is the patch alone: the second delivers the text, the third counts a drag's events as pointer
+input (found by Dacto's integration test before anything was pinned). `upstream/0001-text-drops.patch` is the whole
+patch against the first commit.
 
 ## The patch: text dragged in from other apps
 
@@ -20,13 +22,15 @@ application (a selection in Notes, Safari or Mail) is refused at the window. The
 `NSPasteboardTypeString` beside it and reads the string when the pasteboard holds no file names; `gpui-pre` delivers
 it as `FileDropEvent::TextEntered` with an `ExternalText` as the drag's value, which elements receive with
 `on_drop::<ExternalText>`. File drops are unchanged: a pasteboard with file names is still a file drop carrying
-`ExternalPaths`, and every existing `on_drop::<ExternalPaths>` handler fires as before. Windows and Linux are not
+`ExternalPaths`, and every existing `on_drop::<ExternalPaths>` handler fires as before. The drag's events also count
+as pointer input for the window's input modality, so a drop right after typing still finds the element under the
+pointer hovered (AppKit sends no mouse-moved events during a drag, and GPUI kept the keyboard's modality). Windows and Linux are not
 patched (their platforms register text drops their own way).
 
 ## How Dacto pins it
 
 Dacto's `client/Cargo.toml` names this repository by URL and full revision in `[patch.crates-io]` (never a path), and
-`client/deny.toml` allows exactly this URL as a git source. The pinned revision is the patch commit; the patch is
+`client/deny.toml` allows exactly this URL as a git source. The pinned revision is this repository's head; the patch is
 dropped when a `gpui-pre` release carries the change.
 
 ## Upstream

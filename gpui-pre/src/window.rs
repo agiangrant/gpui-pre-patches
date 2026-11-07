@@ -5641,6 +5641,15 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // A drag from another application moves the pointer without mouse-moved events, so its
+            // events are pointer input too: otherwise a drop right after typing finds no element
+            // hovered and no `on_drop` handler runs.
+            PlatformInput::FileDrop(
+                FileDropEvent::Entered { .. }
+                | FileDropEvent::TextEntered { .. }
+                | FileDropEvent::Pending { .. }
+                | FileDropEvent::Submit { .. },
+            ) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
